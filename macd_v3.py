@@ -286,6 +286,15 @@ try:
 except:
     st.warning("Telegram 設定未完成，請在 .streamlit/secrets.toml 中添加 BOT_TOKEN 和 CHAT_ID。")
 
+# NewsAPI 設定
+news_ready = False
+news_api_key = None
+try:
+    news_api_key = st.secrets["newsapi"]["API_KEY"]
+    news_ready = True
+except:
+    st.warning("NewsAPI 設定未完成，請在 .streamlit/secrets.toml 中添加 newsapi 區段和 API_KEY。")
+
 # 側邊欄輸入參數
 with st.sidebar:
     st.subheader('自訂參數')
@@ -297,7 +306,8 @@ with st.sidebar:
 
     # 新聞 API 設定
     st.subheader('新聞設定')
-    news_api_key = st.text_input('NewsAPI 金鑰 (選填，獲取: https://newsapi.org/)', type='password', help='輸入 NewsAPI.org 的 API 金鑰以啟用即時新聞饋送。')
+    if not news_ready:
+        st.info("**如何設定 NewsAPI 金鑰：**\n\n在 `.streamlit/secrets.toml` 檔案中添加以下內容：\n\n```toml\n[newsapi]\nAPI_KEY = \"your_newsapi_key_here\"\n```\n\n獲取金鑰：https://newsapi.org/")
 
     # 自動刷新選項
     enable_auto_refresh = st.checkbox('啟用自動刷新', value=False)
@@ -449,7 +459,10 @@ def refresh_data():
                                 st.markdown(f"[閱讀全文]({article['url']})")
                             st.caption(f"來源: {article['source']['name']}")
                 else:
-                    st.info("無新聞數據，請檢查 NewsAPI 金鑰或網路連線。")
+                    if news_ready:
+                        st.info("無相關新聞數據。")
+                    else:
+                        st.info("無新聞數據，請檢查 NewsAPI 金鑰設定。")
 
 # 初始載入數據
 refresh_data()

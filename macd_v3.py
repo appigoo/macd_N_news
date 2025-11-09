@@ -465,33 +465,42 @@ def refresh_data():
                 st.subheader('最近 10 根 K 線數據')
                 st.dataframe(data.tail(10)[['Open', 'High', 'Low', 'Close', 'Volume']])
 
-                # 成交量走勢圖
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.subheader('價格走勢')
-                    st.line_chart(data['Close'].tail(50))
-                with col2:
-                    st.subheader('MACD Histogram')
-                    st.line_chart(data['Histogram'].tail(50))
-                with col3:
-                    st.subheader('成交量')
-                    st.bar_chart(data['Volume'].tail(50))
+                # 新增：用 tabs 分離圖表和新聞，確保同時可見
+                tab1, tab2 = st.tabs(["📈 走勢圖表", "📰 即時新聞"])
 
-                # 即時新聞饋送
-                news = selected_result['news']
-                if news:
-                    st.subheader(f'{selected_ticker} 最新新聞 (前 5 則)')
-                    for article in news:
-                        with st.expander(f"{article['title']} - {article['publishedAt'][:19]}"):
-                            st.write(article['description'] or '無摘要')
-                            if article['url']:
-                                st.markdown(f"[閱讀全文]({article['url']})")
-                            st.caption(f"來源: {article['source']['name']}")
-                else:
-                    if news_ready:
-                        st.info("無相關新聞數據。")
-                    else:
-                        st.info("無新聞數據，請檢查 NewsAPI 金鑰設定。")
+                with tab1:
+                    # 新增：載入 spinner 避免閃爍
+                    with st.spinner('載入圖表...'):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.subheader('價格走勢')
+                            st.line_chart(data['Close'].tail(50))
+                        with col2:
+                            st.subheader('MACD Histogram')
+                            st.line_chart(data['Histogram'].tail(50))
+                        with col3:
+                            st.subheader('成交量')
+                            st.bar_chart(data['Volume'].tail(50))
+
+                with tab2:
+                    # 新增：載入 spinner 和佔位符
+                    with st.spinner('載入新聞...'):
+                        news = selected_result['news']
+                        if news:
+                            st.subheader(f'{selected_ticker} 最新新聞 (前 5 則)')
+                            for i, article in enumerate(news, 1):
+                                with st.expander(f"{i}. {article['title']} - {article['publishedAt'][:19]}"):
+                                    st.write(article['description'] or '無摘要')
+                                    if article['url']:
+                                        st.markdown(f"[閱讀全文]({article['url']})")
+                                    st.caption(f"來源: {article['source']['name']}")
+                        else:
+                            if news_ready:
+                                st.info("🔍 無相關新聞數據。嘗試調整股票代碼或稍後刷新。")
+                                st.caption("提示：NewsAPI 可能需時間更新，或試用其他 ticker 如 AAPL。")
+                            else:
+                                st.warning("⚠️ 無新聞數據，請檢查 NewsAPI 金鑰設定。")
+                                st.info("**快速設定步驟：**\n1. 註冊 https://newsapi.org\n2. 在 `.streamlit/secrets.toml` 添加 [newsapi] API_KEY\n3. 重新啟動 app。")
 
 # 初始載入數據
 refresh_data()

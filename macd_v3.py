@@ -157,7 +157,9 @@ def get_news(ticker, api_key):
         response = requests.get(url)
         if response.status_code == 200:
             articles = response.json().get('articles', [])
-            return articles
+            # 確保按發布時間降序排列（最新在前）
+            articles = sorted(articles, key=lambda x: x['publishedAt'], reverse=True)
+            return articles[:5]  # 限制為最新5條
         else:
             st.error(f"新聞 API 請求失敗: {response.status_code}")
             return []
@@ -452,8 +454,8 @@ def refresh_data():
                 news = selected_result['news']
                 if news:
                     st.subheader(f'{selected_ticker} 最新新聞 (前 5 則)')
-                    for article in news:
-                        with st.expander(f"{article['title']} - {article['publishedAt'][:19]}"):
+                    for i, article in enumerate(news, 1):
+                        with st.expander(f"{i}. {article['title']} - {article['publishedAt'][:19]}"):
                             st.write(article['description'] or '無摘要')
                             if article['url']:
                                 st.markdown(f"[閱讀全文]({article['url']})")

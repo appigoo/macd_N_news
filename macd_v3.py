@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import requests  # 用於 Telegram API 請求和新新聞 API
-import time  # 用於自動刷新時間檢查
 
 # 嘗試導入 streamlit-autorefresh 以支援自動刷新
 try:
@@ -64,81 +63,84 @@ def calculate_bb(df, period=20, std=2):
     lower = sma - (std * std_dev)
     return upper, sma, lower
 
-# 發送 Telegram 通知
-def send_telegram_notification(message):
+# 發送 Telegram 通知（添加防重發邏輯）
+def send_telegram_notification(message, last_sent_time=None):
+    if last_sent_time and (datetime.now() - last_sent_time).seconds < 60:  # 防 1 分內重發
+        st.info("通知已於最近發送，跳過。")
+        return False
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
             'chat_id': CHAT_ID,
             'text': message,
-            'parse_mode': 'HTML'  # 支援簡單格式化
+            'parse_mode': 'HTML'
         }
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             st.success("Telegram 通知已發送！")
+            return True
         else:
             st.error(f"Telegram 通知失敗: {response.status_code}")
+            return False
     except Exception as e:
         st.error(f"發送 Telegram 通知時出錯: {e}")
+        return False
 
-# 檢測多頭分歧
+# 檢測多頭分歧（修復 NaN/空 diff 處理）
 def detect_bullish_divergence(df, histogram):
     if len(df) < 3:
         return False
-    recent_lows = pd.to_numeric(df['Low'].iloc[-3:], errors='coerce')
-    hist_lows = pd.to_numeric(histogram.iloc[-3:], errors='coerce')
+    recent_lows = pd.to_numeric(df['Low'].iloc[-3:], errors='coerce').dropna()
+    hist_lows = pd.to_numeric(histogram.iloc[-3:], errors='coerce').dropna()
+    if len(recent_lows) < 2 or len(hist_lows) < 2:  # 新增：確保足夠數據
+        return False
     diff_lows = recent_lows.diff().dropna()
     diff_hists = hist_lows.diff().dropna()
-    # 確保數值比較
-    lows_decreasing = all(pd.to_numeric(d, errors='coerce') <= 0 and pd.notna(pd.to_numeric(d, errors='coerce')) for d in diff_lows)
-    hist_decreasing = all(pd.to_numeric(d, errors='coerce') <= 0 and pd.notna(pd.to_numeric(d, errors='coerce')) for d in diff_hists)
-    # 多頭分歧判斷是價格創新低，但指標沒有創新低
-    if lows_decreasing and not hist_decreasing:
-        return True
-    return False
+    if len(diff_lows) < 1 or len(diff_hists) < 1:  # 新增：空 diff 檢查
+        return False
+    lows_decreasing = all(d <= 0 and not pd.isna(d) for d in diff_lows)
+    hist_decreasing = all(d <= 0 and not pd.isna(d) for d in diff_hists)
+    return lows_decreasing and not hist_decreasing
 
-# 檢測熊頭分歧
+# 檢測熊頭分歧（同上修復）
 def detect_bearish_divergence(df, histogram):
     if len(df) < 3:
         return False
-    recent_highs = pd.to_numeric(df['High'].iloc[-3:], errors='coerce')
-    hist_highs = pd.to_numeric(histogram.iloc[-3:], errors='coerce')
+    recent_highs = pd.to_numeric(df['High'].iloc[-3:], errors='coerce').dropna()
+    hist_highs = pd.to_numeric(histogram.iloc[-3:], errors='coerce').dropna()
+    if len(recent_highs) < 2 or len(hist_highs) < 2:
+        return False
     diff_highs = recent_highs.diff().dropna()
     diff_hists = hist_highs.diff().dropna()
-    # 確保數值比較
-    highs_increasing = all(pd.to_numeric(d, errors='coerce') >= 0 and pd.notna(pd.to_numeric(d, errors='coerce')) for d in diff_highs)
-    hist_increasing = all(pd.to_numeric(d, errors='coerce') >= 0 and pd.notna(pd.to_numeric(d, errors='coerce')) for d in diff_hists)
-    # 熊頭分歧判斷是價格創新高，但指標沒有創新高
-    if highs_increasing and not hist_increasing:
-        return True
-    return False
+    if len(diff_highs) < 1 or len(diff_hists) < 1:
+        return False
+    highs_increasing = all(d >= 0 and not pd.isna(d) for d in diff_highs)
+    hist_increasing = all(d >= 0 and not pd.isna(d) for d in diff_hists)
+    return highs_increasing and not hist_increasing
 
-# 獲取數據
+# 獲取數據（添加快取）
+@st.cache_data(ttl=300)  # 新增：5 分快取
 def get_data(ticker, period, interval):
     try:
-        # 嘗試使用 Ticker.history 以避免 download 的某些錯誤
-        data = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+        data = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False, prepost=True)  # 新增 prepost=True (2025 推薦)
         if data.empty:
-            # 後備：嘗試每日數據（適合周末）
             is_weekend = datetime.now().weekday() >= 5
             if is_weekend:
-                data = yf.Ticker(ticker).history(period='5d', interval='1d', auto_adjust=False)
+                data = yf.Ticker(ticker).history(period='5d', interval='1d', auto_adjust=False, prepost=True)
         if data.empty:
             return pd.DataFrame()
         
-        # 確保 OHLCV 為數值型
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         for col in required_cols:
             if col in data.columns:
                 data[col] = pd.to_numeric(data[col], errors='coerce')
-        data = data.dropna(subset=['Close'])  # 移除無效行
+        data = data.dropna(subset=['Close'])
         
         return data
     except Exception as e:
         st.error(f"獲取數據失敗 ({ticker}): {e}")
-        # 後備每日數據
         try:
-            data = yf.Ticker(ticker).history(period='5d', interval='1d', auto_adjust=False)
+            data = yf.Ticker(ticker).history(period='5d', interval='1d', auto_adjust=False, prepost=True)
             if not data.empty:
                 for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
                     if col in data.columns:
@@ -148,18 +150,16 @@ def get_data(ticker, period, interval):
             pass
         return pd.DataFrame()
 
-# 獲取即時新聞
-def get_news(ticker, api_key):
+# 獲取即時新聞（添加語言選項）
+def get_news(ticker, api_key, language='en'):  # 新增語言參數
     if not api_key:
         return []
     try:
-        url = f'https://newsapi.org/v2/everything?q={ticker}&apiKey={api_key}&sortBy=publishedAt&pageSize=5&language=en'
+        url = f'https://newsapi.org/v2/everything?q={ticker}&apiKey={api_key}&sortBy=publishedAt&pageSize=5&language={language}'
         response = requests.get(url)
         if response.status_code == 200:
             articles = response.json().get('articles', [])
-            # 確保按發布時間降序排列（最新在前）
-            articles = sorted(articles, key=lambda x: x['publishedAt'], reverse=True)
-            return articles[:5]  # 限制為最新5條
+            return articles
         else:
             st.error(f"新聞 API 請求失敗: {response.status_code}")
             return []
@@ -167,8 +167,8 @@ def get_news(ticker, api_key):
         st.error(f"獲取新聞失敗: {e}")
         return []
 
-# 計算單一股票的指標和信號
-def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std, news_api_key):
+# 計算單一股票的指標和信號（修復 NaN 檢查，重複計算移出）
+def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std, news_api_key, language='en'):
     data = get_data(ticker, period, interval)
     if data.empty:
         return None
@@ -178,7 +178,7 @@ def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, r
     if missing_cols:
         return None
 
-    data = data.tail(500)  # 限制數據長度
+    data = data.tail(500)
 
     macd_line, signal_line, histogram = calculate_macd(data, fast=macd_fast, slow=macd_slow, signal=macd_signal)
     data['MACD'] = macd_line
@@ -200,33 +200,37 @@ def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, r
     if len(data) < 10:
         return None
 
-    latest_hist = pd.to_numeric(data['Histogram'].tail(3), errors='coerce')
-    diff_hist = latest_hist.diff().dropna()
-    # 確保數值比較
-    hist_increasing = all(pd.to_numeric(d, errors='coerce') > 0 and pd.notna(pd.to_numeric(d, errors='coerce')) for d in diff_hist) and (latest_hist.iloc[-1] < 0)
+    # 修復：安全計算 hist diff
+    latest_hist = pd.to_numeric(data['Histogram'].tail(3), errors='coerce').dropna()
+    if len(latest_hist) < 2:
+        hist_increasing = hist_decreasing = False
+    else:
+        diff_hist = latest_hist.diff().dropna()
+        hist_increasing = (len(diff_hist) >= 1) and all(d > 0 and not pd.isna(d) for d in diff_hist) and (latest_hist.iloc[-1] < 0 and not pd.isna(latest_hist.iloc[-1]))
+        hist_decreasing = (len(diff_hist) >= 1) and all(d < 0 and not pd.isna(d) for d in diff_hist) and (latest_hist.iloc[-1] > 0 and not pd.isna(latest_hist.iloc[-1]))
+
     divergence = detect_bullish_divergence(data, data['Histogram'])
     bearish_divergence = detect_bearish_divergence(data, data['Histogram'])
     rsi_latest = data['RSI'].iloc[-1]
-    rsi_signal = (rsi_latest > 40) and (data['RSI'].iloc[-2] < 30) if len(data) > 1 else False
-    rsi_sell_signal = (rsi_latest < 60) and (data['RSI'].iloc[-2] > 70) if len(data) > 1 else False
-    stoch_cross = (data['%K'].iloc[-1] > data['%D'].iloc[-1]) and (data['%K'].iloc[-2] < 20) if len(data) > 1 else False
-    stoch_sell_cross = (data['%K'].iloc[-1] < data['%D'].iloc[-1]) and (data['%K'].iloc[-2] > 80) if len(data) > 1 else False
+    rsi_signal = (not pd.isna(rsi_latest) and rsi_latest > 40) and (len(data) > 1 and not pd.isna(data['RSI'].iloc[-2]) and data['RSI'].iloc[-2] < 30)
+    rsi_sell_signal = (not pd.isna(rsi_latest) and rsi_latest < 60) and (len(data) > 1 and not pd.isna(data['RSI'].iloc[-2]) and data['RSI'].iloc[-2] > 70)
+    stoch_cross = (len(data) > 1 and not pd.isna(data['%K'].iloc[-1]) and not pd.isna(data['%D'].iloc[-1]) and data['%K'].iloc[-1] > data['%D'].iloc[-1]) and (not pd.isna(data['%K'].iloc[-2]) and data['%K'].iloc[-2] < 20)
+    stoch_sell_cross = (len(data) > 1 and not pd.isna(data['%K'].iloc[-1]) and not pd.isna(data['%D'].iloc[-1]) and data['%K'].iloc[-1] < data['%D'].iloc[-1]) and (not pd.isna(data['%K'].iloc[-2]) and data['%K'].iloc[-2] > 80)
     vol_mean = data['Volume'].rolling(10).mean().iloc[-1]
-    volume_spike = (not pd.isna(vol_mean)) and (data['Volume'].iloc[-1] > vol_mean * 1.5) if len(data) > 10 else False
-    volume_sell_spike = volume_spike and (data['Close'].iloc[-1] < data['Close'].iloc[-2]) if len(data) > 1 else False
-    obv_up = (data['OBV'].diff().iloc[-1] > 0) if len(data) > 1 else False
-    obv_down = (data['OBV'].diff().iloc[-1] < 0) if len(data) > 1 else False
-    mfi_signal = (data['MFI'].iloc[-1] > 20) and (data['MFI'].iloc[-2] < 20) if len(data) > 1 else False
-    mfi_sell_signal = (data['MFI'].iloc[-1] < 80) and (data['MFI'].iloc[-2] > 80) if len(data) > 1 else False
-    bb_signal = data['Close'].iloc[-1] < data['BB_lower'].iloc[-1] if len(data) > 0 else False
-    bb_sell_signal = data['Close'].iloc[-1] > data['BB_upper'].iloc[-1] if len(data) > 0 else False
+    volume_spike = (len(data) > 10 and not pd.isna(vol_mean) and not pd.isna(data['Volume'].iloc[-1]) and data['Volume'].iloc[-1] > vol_mean * 1.5)
+    volume_sell_spike = volume_spike and (len(data) > 1 and data['Close'].iloc[-1] < data['Close'].iloc[-2])
+    obv_up = (len(data) > 1 and not pd.isna(data['OBV'].diff().iloc[-1]) and data['OBV'].diff().iloc[-1] > 0)
+    obv_down = (len(data) > 1 and not pd.isna(data['OBV'].diff().iloc[-1]) and data['OBV'].diff().iloc[-1] < 0)
+    mfi_signal = (len(data) > 1 and not pd.isna(data['MFI'].iloc[-1]) and not pd.isna(data['MFI'].iloc[-2]) and data['MFI'].iloc[-1] > 20 and data['MFI'].iloc[-2] < 20)
+    mfi_sell_signal = (len(data) > 1 and not pd.isna(data['MFI'].iloc[-1]) and not pd.isna(data['MFI'].iloc[-2]) and data['MFI'].iloc[-1] < 80 and data['MFI'].iloc[-2] > 80)
+    bb_signal = (len(data) > 0 and not pd.isna(data['Close'].iloc[-1]) and not pd.isna(data['BB_lower'].iloc[-1]) and data['Close'].iloc[-1] < data['BB_lower'].iloc[-1])
+    bb_sell_signal = (len(data) > 0 and not pd.isna(data['Close'].iloc[-1]) and not pd.isna(data['BB_upper'].iloc[-1]) and data['Close'].iloc[-1] > data['BB_upper'].iloc[-1])
 
     # 買入信號
     buy_signals = [hist_increasing, divergence, rsi_signal, stoch_cross, volume_spike, obv_up, mfi_signal, bb_signal]
     buy_score = sum(buy_signals)
 
-    # 賣出信號（對應相反邏輯）
-    hist_decreasing = all(pd.to_numeric(d, errors='coerce') < 0 and pd.notna(pd.to_numeric(d, errors='coerce')) for d in diff_hist) and (latest_hist.iloc[-1] > 0)
+    # 賣出信號
     sell_signals = [hist_decreasing, bearish_divergence, rsi_sell_signal, stoch_sell_cross, volume_sell_spike, obv_down, mfi_sell_signal, bb_sell_signal]
     sell_score = sum(sell_signals)
 
@@ -242,24 +246,29 @@ def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, r
     if sell_score >= 5:
         sell_suggestion = '強烈賣出信號：多指標確認，預測 MACD 即將交叉轉負。考慮出場，設止盈。'
 
-    # 檢查是否發送 Telegram 通知
+    # Telegram 通知（添加時間戳防重）
     telegram_sent_buy = False
     telegram_sent_sell = False
+    last_buy_time = st.session_state.get('last_buy_time', {}).get(ticker)
+    last_sell_time = st.session_state.get('last_sell_time', {}).get(ticker)
     if buy_score >= 5 and enable_telegram_buy and telegram_ready:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = f"<b>🚨 強烈買入信號！</b>\n股票: {ticker}\n時間: {now}\n收盤價: {data['Close'].iloc[-1]:.2f}\n信號強度: {buy_score}/8\n建議: {buy_suggestion}"
-        send_telegram_notification(message)
-        telegram_sent_buy = True
+        if send_telegram_notification(message, last_buy_time):
+            st.session_state.setdefault('last_buy_time', {})[ticker] = datetime.now()
+            telegram_sent_buy = True
 
     if sell_score >= 5 and enable_telegram_sell and telegram_ready:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = f"<b>⚠️ 強烈賣出信號！</b>\n股票: {ticker}\n時間: {now}\n收盤價: {data['Close'].iloc[-1]:.2f}\n信號強度: {sell_score}/8\n建議: {sell_suggestion}"
-        send_telegram_notification(message)
-        telegram_sent_sell = True
+        if send_telegram_notification(message, last_sell_time):
+            st.session_state.setdefault('last_sell_time', {})[ticker] = datetime.now()
+            telegram_sent_sell = True
 
     # 獲取新聞
-    news = get_news(ticker, news_api_key)
+    news = get_news(ticker, news_api_key, language)
 
+    # 新增：返回所有信號細節，避免重複計算
     return {
         'ticker': ticker,
         'close': data['Close'].iloc[-1],
@@ -268,20 +277,37 @@ def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, r
         'buy_suggestion': buy_suggestion,
         'sell_suggestion': sell_suggestion,
         'rsi': rsi_latest,
-        'data': data,  # 保留數據用於詳細顯示
-        'news': news,  # 新聞數據
+        'data': data,
+        'news': news,
         'telegram_buy': telegram_sent_buy,
-        'telegram_sell': telegram_sent_sell
+        'telegram_sell': telegram_sent_sell,
+        'signals': {  # 新增：所有信號 dict
+            'hist_increasing': hist_increasing,
+            'hist_decreasing': hist_decreasing,
+            'divergence': divergence,
+            'bearish_divergence': bearish_divergence,
+            'rsi_signal': rsi_signal,
+            'rsi_sell_signal': rsi_sell_signal,
+            'stoch_cross': stoch_cross,
+            'stoch_sell_cross': stoch_sell_cross,
+            'volume_spike': volume_spike,
+            'volume_sell_spike': volume_sell_spike,
+            'obv_up': obv_up,
+            'obv_down': obv_down,
+            'mfi_signal': mfi_signal,
+            'mfi_sell_signal': mfi_sell_signal,
+            'bb_signal': bb_signal,
+            'bb_sell_signal': bb_sell_signal
+        }
     }
 
 # Streamlit app 主介面
 st.title('股票日內交易助手（多股票監控 + 即時新聞）')
 st.write('基於 MACD、Histogram 變化、多頭分歧、RSI、Stochastic、OBV、MFI、BB 指標，自動更新。支援多股票監控及即時新聞饋送。')
 
-# Telegram 設定（整合用戶提供的 try 塊）
+# Telegram 設定
 telegram_ready = False
 try:
-    # 假設 secrets.toml 已經設定
     BOT_TOKEN = st.secrets["telegram"]["BOT_TOKEN"]
     CHAT_ID = st.secrets["telegram"]["CHAT_ID"]
     telegram_ready = True
@@ -302,12 +328,13 @@ with st.sidebar:
     st.subheader('自訂參數')
     ticker_input = st.text_input('股票代碼 (逗號分隔, 如: TSLA,AAPL,GOOGL)', value='TSLA')
     tickers = [t.strip().upper() for t in ticker_input.split(',') if t.strip()]
-    period = st.selectbox('數據天數', ['1d', '5d', '10d'], index=1)  # 默認 5d 以避免周末 1d 問題
-    interval = st.selectbox('K線間隔', ['1m', '5m', '15m', '1d'], index=1)  # 添加 1d 選項
+    period = st.selectbox('數據天數', ['1d', '5d', '10d'], index=1)
+    interval = st.selectbox('K線間隔', ['1m', '5m', '15m', '1d'], index=1)
     refresh_minutes = st.number_input('建議刷新間隔（分鐘）', value=5, min_value=1)
 
-    # 新聞 API 設定
+    # 新聞 API 設定（添加語言選項）
     st.subheader('新聞設定')
+    news_language = st.selectbox('新聞語言', ['en', 'zh'], index=0)  # 新增
     if not news_ready:
         st.info("**如何設定 NewsAPI 金鑰：**\n\n在 `.streamlit/secrets.toml` 檔案中添加以下內容：\n\n```toml\n[newsapi]\nAPI_KEY = \"your_newsapi_key_here\"\n```\n\n獲取金鑰：https://newsapi.org/")
 
@@ -340,18 +367,14 @@ with st.sidebar:
         enable_telegram_sell = False
         st.info("啟用 Telegram 前，請設定 secrets.toml。")
 
-# 自動刷新邏輯（使用 streamlit-autorefresh）
+# 自動刷新邏輯
 if enable_auto_refresh and autorefresh_available and auto_interval_minutes > 0:
     st_autorefresh(interval=auto_interval_minutes * 60 * 1000, limit=None, key='auto_refresh')
 
 placeholder = st.empty()
 
-# 選擇顯示詳細的股票，默認選擇第一個
-if tickers:
-    default_index = 0 if tickers else None
-    selected_ticker = st.selectbox('選擇顯示詳細圖表的股票', tickers, index=default_index)
-else:
-    selected_ticker = None
+# 選擇顯示詳細的股票
+selected_ticker = st.selectbox('選擇顯示詳細圖表的股票', tickers) if tickers else None
 
 def refresh_data():
     if not tickers:
@@ -361,7 +384,7 @@ def refresh_data():
 
     results = []
     for ticker in tickers:
-        result = analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std, news_api_key)
+        result = analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std, news_api_key, news_language)
         if result:
             results.append(result)
 
@@ -397,28 +420,28 @@ def refresh_data():
             st.error(f"強烈賣出信號股票: {', '.join([r['ticker'] for r in strong_sell])}")
 
         if selected_ticker:
-            # 顯示選中股票的詳細資訊
+            # 顯示選中股票的詳細資訊（使用返回的 signals，避免重算）
             selected_result = next((r for r in results if r['ticker'] == selected_ticker), None)
             if selected_result:
                 data = selected_result['data']
-                hist_increasing = all(pd.to_numeric(d, errors='coerce') > 0 and pd.notna(pd.to_numeric(d, errors='coerce')) for d in pd.to_numeric(data['Histogram'].tail(3), errors='coerce').diff().dropna()) and (pd.to_numeric(data['Histogram'].tail(3), errors='coerce').iloc[-1] < 0)
-                hist_decreasing = all(pd.to_numeric(d, errors='coerce') < 0 and pd.notna(pd.to_numeric(d, errors='coerce')) for d in pd.to_numeric(data['Histogram'].tail(3), errors='coerce').diff().dropna()) and (pd.to_numeric(data['Histogram'].tail(3), errors='coerce').iloc[-1] > 0)
-                divergence = detect_bullish_divergence(data, data['Histogram'])
-                bearish_divergence = detect_bearish_divergence(data, data['Histogram'])
-                rsi_latest = data['RSI'].iloc[-1]
-                rsi_signal = (rsi_latest > 40) and (data['RSI'].iloc[-2] < 30) if len(data) > 1 else False
-                rsi_sell_signal = (rsi_latest < 60) and (data['RSI'].iloc[-2] > 70) if len(data) > 1 else False
-                stoch_cross = (data['%K'].iloc[-1] > data['%D'].iloc[-1]) and (data['%K'].iloc[-2] < 20) if len(data) > 1 else False
-                stoch_sell_cross = (data['%K'].iloc[-1] < data['%D'].iloc[-1]) and (data['%K'].iloc[-2] > 80) if len(data) > 1 else False
-                vol_mean = data['Volume'].rolling(10).mean().iloc[-1]
-                volume_spike = (not pd.isna(vol_mean)) and (data['Volume'].iloc[-1] > vol_mean * 1.5) if len(data) > 10 else False
-                volume_sell_spike = volume_spike and (data['Close'].iloc[-1] < data['Close'].iloc[-2]) if len(data) > 1 else False
-                obv_up = (data['OBV'].diff().iloc[-1] > 0) if len(data) > 1 else False
-                obv_down = (data['OBV'].diff().iloc[-1] < 0) if len(data) > 1 else False
-                mfi_signal = (data['MFI'].iloc[-1] > 20) and (data['MFI'].iloc[-2] < 20) if len(data) > 1 else False
-                mfi_sell_signal = (data['MFI'].iloc[-1] < 80) and (data['MFI'].iloc[-2] > 80) if len(data) > 1 else False
-                bb_signal = data['Close'].iloc[-1] < data['BB_lower'].iloc[-1] if len(data) > 0 else False
-                bb_sell_signal = data['Close'].iloc[-1] > data['BB_upper'].iloc[-1] if len(data) > 0 else False
+                signals = selected_result['signals']
+                hist_increasing = signals['hist_increasing']
+                hist_decreasing = signals['hist_decreasing']
+                divergence = signals['divergence']
+                bearish_divergence = signals['bearish_divergence']
+                rsi_latest = selected_result['rsi']
+                rsi_signal = signals['rsi_signal']
+                rsi_sell_signal = signals['rsi_sell_signal']
+                stoch_cross = signals['stoch_cross']
+                stoch_sell_cross = signals['stoch_sell_cross']
+                volume_spike = signals['volume_spike']
+                volume_sell_spike = signals['volume_sell_spike']
+                obv_up = signals['obv_up']
+                obv_down = signals['obv_down']
+                mfi_signal = signals['mfi_signal']
+                mfi_sell_signal = signals['mfi_sell_signal']
+                bb_signal = signals['bb_signal']
+                bb_sell_signal = signals['bb_sell_signal']
 
                 st.subheader(f'{selected_ticker} 詳細數據和指標')
                 st.metric("最新收盤價", f"{data['Close'].iloc[-1]:.2f}")
@@ -446,23 +469,20 @@ def refresh_data():
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.subheader('價格走勢')
-                    chart_data_close = pd.DataFrame({'Close': data['Close'].tail(50)})
-                    st.line_chart(chart_data_close, use_container_width=True)
+                    st.line_chart(data['Close'].tail(50))
                 with col2:
                     st.subheader('MACD Histogram')
-                    chart_data_hist = pd.DataFrame({'Histogram': data['Histogram'].tail(50)})
-                    st.line_chart(chart_data_hist, use_container_width=True)
+                    st.line_chart(data['Histogram'].tail(50))
                 with col3:
                     st.subheader('成交量')
-                    chart_data_vol = pd.DataFrame({'Volume': data['Volume'].tail(50)})
-                    st.bar_chart(chart_data_vol, use_container_width=True)
+                    st.bar_chart(data['Volume'].tail(50))
 
                 # 即時新聞饋送
                 news = selected_result['news']
                 if news:
                     st.subheader(f'{selected_ticker} 最新新聞 (前 5 則)')
-                    for i, article in enumerate(news, 1):
-                        with st.expander(f"{i}. {article['title']} - {article['publishedAt'][:19]}"):
+                    for article in news:
+                        with st.expander(f"{article['title']} - {article['publishedAt'][:19]}"):
                             st.write(article['description'] or '無摘要')
                             if article['url']:
                                 st.markdown(f"[閱讀全文]({article['url']})")
@@ -476,7 +496,7 @@ def refresh_data():
 # 初始載入數據
 refresh_data()
 
-# 手動刷新按鈕（側邊欄參數變化時自動 reruns）
+# 手動刷新按鈕
 st.sidebar.markdown("---")
 if st.sidebar.button('立即刷新數據'):
     st.rerun()

@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import requests  # 用於 Telegram API 請求
+import requests  # 用於 Telegram API 請求和新新聞 API
 import time  # 用於自動刷新時間檢查
 
 # 嘗試導入 streamlit-autorefresh 以支援自動刷新
@@ -148,8 +148,25 @@ def get_data(ticker, period, interval):
             pass
         return pd.DataFrame()
 
+# 獲取即時新聞
+def get_news(ticker, api_key):
+    if not api_key:
+        return []
+    try:
+        url = f'https://newsapi.org/v2/everything?q={ticker}&apiKey={api_key}&sortBy=publishedAt&pageSize=5&language=en'
+        response = requests.get(url)
+        if response.status_code == 200:
+            articles = response.json().get('articles', [])
+            return articles
+        else:
+            st.error(f"新聞 API 請求失敗: {response.status_code}")
+            return []
+    except Exception as e:
+        st.error(f"獲取新聞失敗: {e}")
+        return []
+
 # 計算單一股票的指標和信號
-def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std):
+def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std, news_api_key):
     data = get_data(ticker, period, interval)
     if data.empty:
         return None
@@ -238,6 +255,9 @@ def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, r
         send_telegram_notification(message)
         telegram_sent_sell = True
 
+    # 獲取新聞
+    news = get_news(ticker, news_api_key)
+
     return {
         'ticker': ticker,
         'close': data['Close'].iloc[-1],
@@ -247,13 +267,14 @@ def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, r
         'sell_suggestion': sell_suggestion,
         'rsi': rsi_latest,
         'data': data,  # 保留數據用於詳細顯示
+        'news': news,  # 新聞數據
         'telegram_buy': telegram_sent_buy,
         'telegram_sell': telegram_sent_sell
     }
 
 # Streamlit app 主介面
-st.title('股票日內交易助手（多股票監控）')
-st.write('基於 MACD、Histogram 變化、多頭分歧、RSI、Stochastic、OBV、MFI、BB 指標，自動更新。支援多股票監控。')
+st.title('股票日內交易助手（多股票監控 + 即時新聞）')
+st.write('基於 MACD、Histogram 變化、多頭分歧、RSI、Stochastic、OBV、MFI、BB 指標，自動更新。支援多股票監控及即時新聞饋送。')
 
 # Telegram 設定（整合用戶提供的 try 塊）
 telegram_ready = False
@@ -273,6 +294,10 @@ with st.sidebar:
     period = st.selectbox('數據天數', ['1d', '5d', '10d'], index=1)  # 默認 5d 以避免周末 1d 問題
     interval = st.selectbox('K線間隔', ['1m', '5m', '15m', '1d'], index=1)  # 添加 1d 選項
     refresh_minutes = st.number_input('建議刷新間隔（分鐘）', value=5, min_value=1)
+
+    # 新聞 API 設定
+    st.subheader('新聞設定')
+    news_api_key = st.text_input('NewsAPI 金鑰 (選填，獲取: https://newsapi.org/)', type='password', help='輸入 NewsAPI.org 的 API 金鑰以啟用即時新聞饋送。')
 
     # 自動刷新選項
     enable_auto_refresh = st.checkbox('啟用自動刷新', value=False)
@@ -320,7 +345,7 @@ def refresh_data():
 
     results = []
     for ticker in tickers:
-        result = analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std)
+        result = analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std, news_api_key)
         if result:
             results.append(result)
 
@@ -412,6 +437,19 @@ def refresh_data():
                 with col3:
                     st.subheader('成交量')
                     st.bar_chart(data['Volume'].tail(50))
+
+                # 即時新聞饋送
+                news = selected_result['news']
+                if news:
+                    st.subheader(f'{selected_ticker} 最新新聞 (前 5 則)')
+                    for article in news:
+                        with st.expander(f"{article['title']} - {article['publishedAt'][:19]}"):
+                            st.write(article['description'] or '無摘要')
+                            if article['url']:
+                                st.markdown(f"[閱讀全文]({article['url']})")
+                            st.caption(f"來源: {article['source']['name']}")
+                else:
+                    st.info("無新聞數據，請檢查 NewsAPI 金鑰或網路連線。")
 
 # 初始載入數據
 refresh_data()

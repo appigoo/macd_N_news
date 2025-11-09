@@ -5,6 +5,15 @@ import numpy as np
 from datetime import datetime
 import requests  # 用於 Telegram API 請求和新新聞 API
 
+# 新增：翻譯庫
+try:
+    from googletrans import Translator
+    translator = Translator()
+    translation_available = True
+except ImportError:
+    translator = None
+    translation_available = False
+
 # 嘗試導入 streamlit-autorefresh 以支援自動刷新
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -166,6 +175,19 @@ def get_news(ticker, api_key, language='en'):  # 新增語言參數
     except Exception as e:
         st.error(f"獲取新聞失敗: {e}")
         return []
+
+# 新增：翻譯函數
+def translate_to_chinese(text):
+    if not translation_available or not text:
+        return text
+    try:
+        if translator.detect(text).lang == 'zh':
+            return text  # 已為中文，跳過
+        translated = translator.translate(text, dest='zh-cn').text
+        return translated
+    except Exception as e:
+        st.warning(f"翻譯失敗 ({text[:50]}...): {e}")
+        return text  # 回退原文字
 
 # 計算單一股票的指標和信號（修復 NaN 檢查，重複計算移出）
 def analyze_stock(ticker, period, interval, macd_fast, macd_slow, macd_signal, rsi_period, stoch_k, stoch_d, mfi_period, bb_period, bb_std, news_api_key, language='en'):
@@ -335,6 +357,9 @@ with st.sidebar:
     # 新聞 API 設定（添加語言選項）
     st.subheader('新聞設定')
     news_language = st.selectbox('新聞語言', ['en', 'zh'], index=0)  # 新增
+    enable_translation = st.checkbox('啟用新聞自動翻譯成中文', value=True)  # 新增：翻譯開關
+    if not translation_available:
+        st.warning("要使用翻譯，請安裝 `googletrans`: `pip install googletrans==4.0.0-rc1`")
     if not news_ready:
         st.info("**如何設定 NewsAPI 金鑰：**\n\n在 `.streamlit/secrets.toml` 檔案中添加以下內容：\n\n```toml\n[newsapi]\nAPI_KEY = \"your_newsapi_key_here\"\n```\n\n獲取金鑰：https://newsapi.org/")
 
@@ -484,13 +509,17 @@ def refresh_data():
 
                 with tab2:
                     # 新增：載入 spinner 和佔位符
-                    with st.spinner('載入新聞...'):
+                    spinner_text = '載入新聞...' if not enable_translation else '翻譯中...'
+                    with st.spinner(spinner_text):
                         news = selected_result['news']
                         if news:
                             st.subheader(f'{selected_ticker} 最新新聞 (前 5 則)')
                             for i, article in enumerate(news, 1):
-                                with st.expander(f"{i}. {article['title']} - {article['publishedAt'][:19]}"):
-                                    st.write(article['description'] or '無摘要')
+                                # 新增：自動翻譯
+                                title_zh = translate_to_chinese(article['title']) if enable_translation else article['title']
+                                desc_zh = translate_to_chinese(article['description'] or '無摘要') if enable_translation else (article['description'] or '無摘要')
+                                with st.expander(f"{i}. {title_zh} - {article['publishedAt'][:19]}"):
+                                    st.write(desc_zh)
                                     if article['url']:
                                         st.markdown(f"[閱讀全文]({article['url']})")
                                     st.caption(f"來源: {article['source']['name']}")

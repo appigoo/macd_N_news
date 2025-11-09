@@ -5,3 +5,4 @@ numpy
 requests
 streamlit_autorefresh
 plotly
+googletrans==4.0.0-rc1

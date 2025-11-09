@@ -346,8 +346,12 @@ if enable_auto_refresh and autorefresh_available and auto_interval_minutes > 0:
 
 placeholder = st.empty()
 
-# 選擇顯示詳細的股票
-selected_ticker = st.selectbox('選擇顯示詳細圖表的股票', tickers) if tickers else None
+# 選擇顯示詳細的股票，默認選擇第一個
+if tickers:
+    default_index = 0 if tickers else None
+    selected_ticker = st.selectbox('選擇顯示詳細圖表的股票', tickers, index=default_index)
+else:
+    selected_ticker = None
 
 def refresh_data():
     if not tickers:
@@ -442,13 +446,16 @@ def refresh_data():
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.subheader('價格走勢')
-                    st.line_chart(data['Close'].tail(50))
+                    chart_data_close = pd.DataFrame({'Close': data['Close'].tail(50)})
+                    st.line_chart(chart_data_close, use_container_width=True)
                 with col2:
                     st.subheader('MACD Histogram')
-                    st.line_chart(data['Histogram'].tail(50))
+                    chart_data_hist = pd.DataFrame({'Histogram': data['Histogram'].tail(50)})
+                    st.line_chart(chart_data_hist, use_container_width=True)
                 with col3:
                     st.subheader('成交量')
-                    st.bar_chart(data['Volume'].tail(50))
+                    chart_data_vol = pd.DataFrame({'Volume': data['Volume'].tail(50)})
+                    st.bar_chart(chart_data_vol, use_container_width=True)
 
                 # 即時新聞饋送
                 news = selected_result['news']
